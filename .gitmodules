@@ -1,0 +1,6 @@
+[submodule "cadc_devkit"]
+	path = cadc_devkit
+	url = git@github.com:SirRendore/cadc_devkit.git
+[submodule "cadc_tools"]
+	path = cadc_tools
+	url = git@github.com:asvath/cadcd.git
