@@ -1,3 +1,5 @@
 cadcd
 cadcd_raw
 processed
+__pycache__/
+*.py[cod]

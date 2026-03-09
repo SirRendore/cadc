@@ -1,5 +1,13 @@
+import sys
+
 import numpy as np
+from matplotlib import pyplot as plt
 from pathlib import Path
+
+# sys.path.append("/home/zhaohaoa/cadc/cadc_devkit") 
+CUR_DIR = Path(__file__).parent
+sys.path.append(str(CUR_DIR.parent / "cadc_devkit"))
+
 
 def load_data(dir_path):
     '''
@@ -212,7 +220,7 @@ def infer_direction_2d(
     poses,
     *,
     yaw_deg=12.0,
-    min_step=1e-3,                 # ignore tiny steps
+    min_step=1e-3, # ignore tiny steps
 ):
     '''
     Given array of 2D poses [x, y, yaw], infer direction based on start and end heading.
@@ -246,7 +254,7 @@ def infer_direction_2d(
     if total_yaw_deg < -yaw_deg:
         return np.array([0, 0, 1, 0], dtype=np.float32)
 
-    # ---- 2) STRAIGHT: vote using forward motion in local frame ----
+    # ---- 2) STRAIGHT: vote w forward motion in local frame ----
     fwd_sum = 0.0
     used = 0.0
     for i in range(poses.shape[0] - 1):
@@ -264,7 +272,7 @@ def infer_direction_2d(
         return np.array([0, 1, 0, 0], dtype=np.float32)
     return np.array([0, 0, 0, 1], dtype=np.float32)
 
-def plot_poses_2d(poses, step=20, ax=None):
+def plot_poses_2d(poses, step=20, ax=None, **kwargs):
     '''
     Plot 2D vehicle trajectory with orientation arrows.
     Args:
@@ -285,20 +293,135 @@ def plot_poses_2d(poses, step=20, ax=None):
         fig = plt.figure()
         ax = fig.add_subplot(111)
     # Trajectory
-    ax.plot(t[:, 0], t[:, 1], ".", label="Vehicle Trajectory")
+    ax.plot(t[:, 0], t[:, 1], ".", **kwargs)
     
     # Arrows
-    idx = np.arange(0, t.shape[0], step)
-    ts = t[idx]                 # (M,3)
-    fs = fwd[idx]               # (M,3)
-    # draw all arrows
-    ax.quiver(
-        ts[:, 0], ts[:, 1],          # starts
-        fs[:, 0], fs[:, 1],  # directions
-        color='r',
-    )
+    if step > 0:
+        idx = np.arange(0, t.shape[0], step)
+        ts = t[idx]                 # (M,3)
+        fs = fwd[idx]               # (M,3)
+        # draw all arrows
+        ax.quiver(
+            ts[:, 0], ts[:, 1],          # starts
+            fs[:, 0], fs[:, 1],  # directions
+            color='r',
+        )
     
     ax.set_xlabel("East (m)")
     ax.set_ylabel("North (m)")
     ax.axis('equal')
     return ax
+
+
+def find_closest_timestamp_inds(target_times, timestamps):
+    '''
+    Find indices of the closest timestamps in 'timestamps' for each time in 'target_times'.
+    Args:
+        target_times (np.ndarray): Array of target timestamps to find closest matches for.
+        timestamps (np.ndarray): Array of timestamps to search within.
+    Returns:
+        np.ndarray: Array of indices of the closest timestamps in 'timestamps' for each target time.
+    '''
+    idx = np.searchsorted(timestamps, target_times)
+    idx = np.clip(idx, 1, len(timestamps)-1)
+    left = idx - 1
+    right = idx
+    choose_right = (timestamps[right] - target_times) < (target_times - timestamps[left])
+    return np.where(choose_right, right, left)
+
+
+def extract_pos_vel_acc(raw_path):
+    '''
+    Extract 2D poses, velocities in vehicle frame, and IMU accelerations from Novatel data. Output data in 2Hz.
+    Args:
+        raw_path (Path): Path to the raw data directory.
+    Returns:
+        dict: A dictionary containing:
+            poses (np.ndarray): Nx4 array of 2D poses (x, y, yaw).
+            vel (np.ndarray): Nx2 array of velocities in vehicle frame (v_x, v_y). 
+            acc (np.ndarray): Nx2 array of accelerations in vehicle frame (a_x, a_y).
+            times (np.ndarray): N array of timestamps for poses and velocities.
+            imu_times (np.ndarray): N array of timestamps for IMU data. 
+            start_time_pose (float): Start time for pose data.
+    '''
+    
+    import convert_novatel_to_pose
+
+    novatel_data_path = raw_path / "raw" / "novatel" / "data"
+    novatel_ts_path = raw_path / "raw" / "novatel" / "timestamps.txt"
+    novatel_imu_data_path = raw_path / "raw" / "novatel_imu" / "data"
+    novatel_imu_ts_path = raw_path / "raw" / "novatel_imu" / "timestamps.txt"
+
+    # Data format:
+    # latitude (degrees)
+    # longitude (degrees)
+    # altitude (m)
+    # undulation (m)
+    # latitude_std (m)
+    # longitude_std (m)
+    # altitude_std (m)
+    # roll (degrees)
+    # pitch (degrees)
+    # azimuth (degrees)
+    # roll_std (degrees)
+    # pitch_std (degrees)
+    # azimuth_std (degrees)
+    # ins_status
+    # position_type
+    # extended_status
+    # seconds_since_update (seconds)
+    # north_velocity (m/s)
+    # east_velocity (m/s)
+    # up_velocity (m/s)
+    # north_velocity_std (m/s)
+    # east_velocity_std (m/s)
+    # up_velocity_std (m/s)
+    novatel_data = load_data(novatel_data_path)
+    poses = convert_novatel_to_pose.convert_novatel_to_pose(novatel_data)
+    times, start_time = load_timestamps(novatel_ts_path) 
+    # This is at 20 Hz. Downsample to 2 Hz by taking every 10th frame
+    poses_downsampled = poses[::10]
+    times_downsampled = times[::10]
+    poses_2d = convert_to_2d(poses_downsampled) # Convert to 2D
+    yaw = np.deg2rad(90 - novatel_data[::10, 9]) # Azimuth in radians
+
+    # Convert world -> vehicle (x forward, y left): rotate by -yaw
+    v_n = novatel_data[::10, 17]                    # North
+    v_e = novatel_data[::10, 18]                    # East
+    v_x =  v_e * np.cos(yaw) + v_n * np.sin(yaw)
+    v_y = -v_e * np.sin(yaw) + v_n * np.cos(yaw)
+    velocities_vehicle_frame = np.stack([v_x, v_y], axis=1)
+
+    # Novatel IMU data
+    # Format:
+    # pitch_rate (rad/sample)
+    # roll_rate (rad/sample)
+    # yaw_rate (rad/sample)
+    # x_accel (m/s/sample)
+    # y_accel (m/s/sample)
+    # z_accel (m/s/sample)
+    novatel_imu_data = load_data(novatel_imu_data_path)
+    novatel_imu_times, novatel_imu_start_time = load_timestamps(novatel_imu_ts_path)
+    novatel_imu_times_aligned = novatel_imu_times + (np.timedelta64(novatel_imu_start_time - start_time) / np.timedelta64(1, 's')) # align start times
+    # Find corresponding indices in novatel_imu_times for times_downsampled
+    novatel_imu_indices = find_closest_timestamp_inds(times_downsampled, novatel_imu_times_aligned)
+
+    acc_downsampled = novatel_imu_data[novatel_imu_indices, 3:5] * 100  # Convert from per sample to per second (100 Hz)
+    acc_times_downsampled = novatel_imu_times_aligned[novatel_imu_indices]
+
+    # Convert to vehicle frame
+    acc_lat = acc_downsampled[:, 0] # right
+    acc_lon = acc_downsampled[:, 1] # forward
+
+    acc_x = acc_lon
+    acc_y = -acc_lat
+
+    # Return dictionary
+    return {
+        "poses": poses_2d,
+        "velocities": velocities_vehicle_frame,
+        "accelerations": np.stack([acc_x, acc_y], axis=1),
+        "pose_times": times_downsampled,
+        "imu_times": acc_times_downsampled,
+        "start_time_pose": start_time,
+    }
